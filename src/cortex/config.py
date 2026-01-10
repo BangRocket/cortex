@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -126,6 +126,19 @@ class RetrievalConfig(BaseSettings):
     # Limits
     default_limit: int = 20
     max_limit: int = 100
+
+    @model_validator(mode="after")
+    def validate_weights_sum_to_one(self) -> "RetrievalConfig":
+        """Ensure retrieval weights sum to 1.0."""
+        total = (
+            self.similarity_weight
+            + self.recency_weight
+            + self.emotion_weight
+            + self.reinforcement_weight
+        )
+        if abs(total - 1.0) > 0.01:
+            raise ValueError(f"Retrieval weights must sum to 1.0, got {total:.3f}")
+        return self
 
 
 class CortexConfig(BaseSettings):

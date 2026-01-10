@@ -45,6 +45,7 @@ class ConsolidationRunner:
             scorer=scorer,
             postgres=postgres,
             redis=redis,
+            embedder=embedder,
             lookback_days=self.config.pattern_lookback_days,
             min_memories=self.config.pattern_min_memories,
             confidence_threshold=self.config.pattern_confidence_threshold,

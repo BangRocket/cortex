@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
 
 import structlog
 
@@ -12,6 +13,9 @@ from cortex.models import Memory, MemoryType, Pattern
 from cortex.stores.postgres_store import PostgresStore
 from cortex.stores.redis_store import RedisStore
 from cortex.utils.scorer import EmotionScorer
+
+if TYPE_CHECKING:
+    from cortex.utils.embedder import Embedder
 
 logger = structlog.get_logger(__name__)
 
@@ -45,6 +49,7 @@ class PatternExtractor:
         scorer: EmotionScorer,
         postgres: PostgresStore,
         redis: RedisStore,
+        embedder: "Embedder",
         lookback_days: int = 7,
         min_memories: int = 5,
         confidence_threshold: float = 0.8,
@@ -52,6 +57,7 @@ class PatternExtractor:
         self.scorer = scorer
         self.postgres = postgres
         self.redis = redis
+        self.embedder = embedder
         self.lookback_days = lookback_days
         self.min_memories = min_memories
         self.confidence_threshold = confidence_threshold
@@ -147,10 +153,10 @@ class PatternExtractor:
                 await self.redis.update_identity_field(user_id, key, pattern.fact)
                 applied += 1
 
-            # Store as semantic memory regardless of category
-            from cortex.utils.embedder import create_embedder
-            from cortex.config import EmbeddingConfig
+            # Generate embedding for semantic memory
+            embedding = await self.embedder.embed(pattern.fact)
 
+            # Store as semantic memory regardless of category
             memory = Memory(
                 user_id=user_id,
                 content=pattern.fact,
@@ -158,6 +164,7 @@ class PatternExtractor:
                 confidence=pattern.confidence,
                 source="consolidation",
                 metadata={"pattern_category": pattern.category},
+                embedding=embedding,
             )
             await self.postgres.store(memory)
 

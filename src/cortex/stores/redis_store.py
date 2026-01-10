@@ -212,8 +212,12 @@ class RedisStore:
             ttl=ttl,
         )
 
-    async def get_working(self, user_id: str) -> list[Memory]:
-        """Get all non-expired working memories."""
+    async def _get_working_with_cleanup(self, user_id: str) -> tuple[list[Memory], int]:
+        """Get non-expired working memories and cleanup expired ones.
+
+        Returns:
+            Tuple of (active memories, count of expired entries removed)
+        """
         assert self.client is not None
         key = self._key(user_id, "working")
 
@@ -246,17 +250,23 @@ class RedisStore:
                 expired.append(member)
 
         # Clean up expired
+        expired_count = 0
         if expired:
             await self.client.zrem(key, *expired)
-            logger.debug("working_memory_expired_removed", user_id=user_id, count=len(expired))
+            expired_count = len(expired)
+            logger.debug("working_memory_expired_removed", user_id=user_id, count=expired_count)
 
-        return result
+        return result, expired_count
+
+    async def get_working(self, user_id: str) -> list[Memory]:
+        """Get all non-expired working memories."""
+        memories, _ = await self._get_working_with_cleanup(user_id)
+        return memories
 
     async def cleanup_expired_working(self, user_id: str) -> int:
         """Remove expired working memories. Returns count removed."""
-        # get_working already cleans up as a side effect
-        await self.get_working(user_id)
-        return 0
+        _, expired_count = await self._get_working_with_cleanup(user_id)
+        return expired_count
 
     async def clear_working(self, user_id: str) -> None:
         """Clear all working memory."""

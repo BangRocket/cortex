@@ -36,10 +36,16 @@ class RejectionPipeline:
         r"^[\U0001F600-\U0001F64F\s]+$",  # Just emojis
     ]
 
-    def __init__(self, enable_llm_check: bool = False, scorer=None) -> None:
+    def __init__(
+        self,
+        enable_llm_check: bool = False,
+        scorer=None,
+        response_threshold: float = 0.5,
+    ) -> None:
         self.patterns = [re.compile(p, re.IGNORECASE) for p in self.REJECTION_PATTERNS]
         self.enable_llm_check = enable_llm_check
         self.scorer = scorer
+        self.response_threshold = response_threshold
 
     def quick_reject(self, message: str) -> bool:
         """Fast pattern-based rejection."""
@@ -87,6 +93,75 @@ Reply: CONTINUE or SWITCH"""
             return "SWITCH" in response.choices[0].message.content.upper()
         except Exception:
             return True  # Default to retrieving if check fails
+
+    async def should_respond(
+        self,
+        context: MemoryContext,
+        message: str,
+        mentioned: bool = False,
+    ) -> bool:
+        """
+        Determine if assistant should respond based on context.
+
+        Args:
+            context: The memory context for this user
+            message: The incoming message
+            mentioned: Whether the assistant was directly addressed
+
+        Returns:
+            True if assistant should respond, False to stay silent
+        """
+        # Always respond if directly mentioned
+        if mentioned:
+            return True
+
+        # Fast rejection for trivial messages
+        if self.quick_reject(message):
+            return False
+
+        # If no working memory context, wait to be addressed
+        if not context.working:
+            return False
+
+        # If LLM check is enabled and we have a scorer, evaluate relevance
+        if self.enable_llm_check and self.scorer:
+            relevance = await self._calculate_relevance(message, context)
+            return relevance >= self.response_threshold
+
+        # Default: respond if we have context
+        return True
+
+    async def _calculate_relevance(self, message: str, context: MemoryContext) -> float:
+        """Calculate relevance score for a message given context."""
+        # Build context summary
+        recent_topics = [m.content[:100] for m in context.working[:5]]
+        context_summary = "\n".join(recent_topics) if recent_topics else "No recent context"
+
+        prompt = f"""Rate how relevant this message is to the current conversation context.
+
+Recent context:
+{context_summary}
+
+New message: {message}
+
+Rate relevance from 0.0 (completely off-topic/not for me) to 1.0 (highly relevant).
+Reply with just a number."""
+
+        try:
+            response = await self.scorer.client.chat.completions.create(
+                model=self.scorer.config.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=5,
+                temperature=0,
+            )
+            text = response.choices[0].message.content.strip()
+            import re as regex
+            match = regex.search(r"(\d+\.?\d*)", text)
+            if match:
+                return float(match.group(1))
+            return 0.5  # Default mid-range if parsing fails
+        except Exception:
+            return 0.5  # Default to mid-range on error
 
 
 # ==================== PROJECT MEMORY ====================
