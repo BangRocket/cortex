@@ -217,7 +217,7 @@ class GraphConfig(BaseSettings):
     model_config = SettingsConfigDict(env_prefix="CORTEX_GRAPH_")
 
     # Enable graph memory
-    enabled: bool = False
+    enabled: bool = True
 
     # Entity extraction
     extract_entities: bool = True
@@ -272,7 +272,7 @@ class CortexConfig(BaseSettings):
     enable_consolidation: bool = True
     enable_emotional_scoring: bool = True
     enable_rejection_pipeline: bool = True
-    enable_graph_memory: bool = False
+    enable_graph_memory: bool = True
 
     # Debug
     debug: bool = False
