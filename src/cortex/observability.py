@@ -119,6 +119,46 @@ class CortexMetrics:
             "LLM scoring requests",
         )
 
+        # In-memory cache (AfterImage pattern)
+        self.cache_hits = Counter(
+            "cortex_cache_hits_total",
+            "In-memory cache hits",
+            ["cache_type"],  # identity, context
+        )
+        self.cache_misses = Counter(
+            "cortex_cache_misses_total",
+            "In-memory cache misses",
+            ["cache_type"],
+        )
+        self.cache_size = Gauge(
+            "cortex_cache_size",
+            "Current cache size",
+            ["cache_type"],
+        )
+
+        # Token budget (AfterImage pattern)
+        self.budget_applications = Counter(
+            "cortex_budget_applications_total",
+            "Token budget applications",
+            ["action"],  # under_budget, summarized
+        )
+        self.context_tokens = Histogram(
+            "cortex_context_tokens",
+            "Token count of generated context",
+            buckets=[100, 500, 1000, 2000, 4000, 8000, 16000],
+        )
+
+        # Churn detection (AfterImage pattern)
+        self.identity_promotions = Counter(
+            "cortex_identity_promotions_total",
+            "Memories promoted to identity type",
+        )
+        self.high_churn_memories = Gauge(
+            "cortex_high_churn_memories",
+            "Number of high-churn memories detected",
+            ["user_id"],
+        )
+
     @classmethod
     def get_instance(cls) -> "CortexMetrics":
         """Get singleton metrics instance."""
@@ -246,3 +286,55 @@ def record_scoring_request() -> None:
     metrics = CortexMetrics.get_instance()
     if PROMETHEUS_AVAILABLE:
         metrics.scoring_requests.inc()
+
+
+# ==================== AfterImage Pattern Metrics ====================
+
+
+def record_cache_hit(cache_type: str) -> None:
+    """Record a cache hit."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.cache_hits.labels(cache_type=cache_type).inc()
+
+
+def record_cache_miss(cache_type: str) -> None:
+    """Record a cache miss."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.cache_misses.labels(cache_type=cache_type).inc()
+
+
+def set_cache_size(cache_type: str, size: int) -> None:
+    """Set current cache size."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.cache_size.labels(cache_type=cache_type).set(size)
+
+
+def record_budget_application(action: str) -> None:
+    """Record a token budget application."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.budget_applications.labels(action=action).inc()
+
+
+def record_context_tokens(token_count: int) -> None:
+    """Record context token count."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.context_tokens.observe(token_count)
+
+
+def record_identity_promotion() -> None:
+    """Record a memory promoted to identity."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.identity_promotions.inc()
+
+
+def set_high_churn_count(user_id: str, count: int) -> None:
+    """Set number of high-churn memories for a user."""
+    metrics = CortexMetrics.get_instance()
+    if PROMETHEUS_AVAILABLE:
+        metrics.high_churn_memories.labels(user_id=user_id).set(count)

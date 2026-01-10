@@ -8,7 +8,11 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from cortex.algorithms import calculate_retrieval_score, calculate_ttl
+from cortex.algorithms import (
+    calculate_retrieval_score_with_churn,
+    calculate_ttl,
+    get_identity_promotion_candidates,
+)
 from cortex.config import CortexConfig
 from cortex.models import (
     Memory,
@@ -20,6 +24,8 @@ from cortex.models import (
 )
 from cortex.stores.postgres_store import PostgresStore
 from cortex.stores.redis_store import RedisStore
+from cortex.utils.budget import TokenBudgetManager
+from cortex.utils.cache import CortexCache
 from cortex.utils.embedder import create_embedder
 from cortex.utils.scorer import EmotionScorer
 
@@ -55,6 +61,14 @@ class MemoryManager:
         self.embedder: Embedder = create_embedder(config.embedding)
         self.scorer = EmotionScorer(config.llm)
         self._initialized = False
+
+        # AfterImage-inspired features
+        self.budget_manager = TokenBudgetManager(config.token_budget)
+        self.cache = CortexCache.get_instance(
+            identity_size=config.cache.identity_cache_size,
+            context_size=config.cache.context_cache_size,
+            ttl=config.cache.cache_ttl,
+        ) if config.cache.enabled else None
 
     async def initialize(self) -> None:
         """Initialize connections to Redis and Postgres."""
@@ -93,8 +107,17 @@ class MemoryManager:
         Returns:
             MemoryContext with identity, session, working, and retrieved memories
         """
-        # Always load from Redis (fast)
-        identity = await self.redis.get_identity(user_id)
+        # Try identity from cache first (AfterImage pattern)
+        identity = None
+        if self.cache:
+            identity = self.cache.identity.get(user_id)
+
+        if identity is None:
+            # Cache miss - load from Redis
+            identity = await self.redis.get_identity(user_id)
+            if self.cache and identity:
+                self.cache.identity.set(user_id, identity)
+
         session = await self.redis.get_session(user_id)
 
         working: list[Memory] = []
@@ -111,7 +134,7 @@ class MemoryManager:
                 project_id=project_id,
                 limit=max_retrieved,
             )
-            # Re-rank with full scoring
+            # Re-rank with full scoring including churn boost
             retrieved = self._rerank(retrieved)
 
             # Record access for retrieved memories
@@ -132,6 +155,7 @@ class MemoryManager:
             has_identity=bool(identity),
             working_count=len(working),
             retrieved_count=len(retrieved),
+            cache_enabled=self.cache is not None,
         )
 
         return MemoryContext(
@@ -141,6 +165,26 @@ class MemoryManager:
             working=working,
             retrieved=retrieved,
             project=project,
+        )
+
+    def get_budgeted_context_string(self, context: MemoryContext) -> str:
+        """
+        Get context formatted as string with token budget applied.
+
+        This is an alternative to context.to_prompt_string() that
+        applies AfterImage-style token budget management.
+
+        Args:
+            context: The MemoryContext to format
+
+        Returns:
+            Formatted string respecting token budget
+        """
+        return self.budget_manager.format_context_with_budget(
+            identity=context.identity,
+            session=context.session,
+            working=context.working,
+            retrieved=context.retrieved,
         )
 
     # ==================== STORE ====================
@@ -256,13 +300,20 @@ class MemoryManager:
         )
 
     def _rerank(self, memories: list[Memory]) -> list[Memory]:
-        """Re-rank memories using full scoring algorithm."""
+        """Re-rank memories using full scoring algorithm with churn boost."""
         now = datetime.utcnow()
 
         scored = []
         for mem in memories:
             similarity = mem.metadata.get("similarity", 0.5)
-            score = calculate_retrieval_score(mem, similarity, now)
+            # Use churn-aware scoring (AfterImage pattern)
+            score = calculate_retrieval_score_with_churn(
+                mem,
+                similarity,
+                now,
+                churn_threshold=self.config.churn.churn_threshold,
+                churn_boost=self.config.churn.importance_boost,
+            )
             scored.append((score, mem))
 
         scored.sort(key=lambda x: x[0], reverse=True)
@@ -322,6 +373,10 @@ class MemoryManager:
         # Update Redis
         await self.redis.update_identity_field(user_id, key, value)
 
+        # Invalidate cache (AfterImage pattern)
+        if self.cache:
+            self.cache.identity.invalidate(user_id)
+
         # Store as identity memory in Postgres
         memory = Memory(
             user_id=user_id,
@@ -338,11 +393,27 @@ class MemoryManager:
 
     async def get_identity(self, user_id: str) -> dict:
         """Get current identity facts."""
-        return await self.redis.get_identity(user_id)
+        # Try cache first
+        if self.cache:
+            cached = self.cache.identity.get(user_id)
+            if cached is not None:
+                return cached
+
+        identity = await self.redis.get_identity(user_id)
+
+        # Populate cache
+        if self.cache and identity:
+            self.cache.identity.set(user_id, identity)
+
+        return identity
 
     async def set_identity(self, user_id: str, identity: dict) -> None:
         """Set full identity (overwrites existing)."""
         await self.redis.set_identity(user_id, identity)
+
+        # Invalidate cache (AfterImage pattern)
+        if self.cache:
+            self.cache.identity.invalidate(user_id)
 
         # Also store each fact to Postgres
         for key, value in identity.items():
@@ -381,4 +452,71 @@ class MemoryManager:
             stats["user_identity"] = bool(await self.redis.get_identity(user_id))
             stats["user_working"] = len(await self.redis.get_working(user_id))
 
+        # Include cache stats if enabled
+        if self.cache:
+            stats["cache"] = self.cache.stats
+
         return stats
+
+    # ==================== CHURN MANAGEMENT (AfterImage pattern) ====================
+
+    async def process_identity_promotions(self, user_id: str) -> int:
+        """
+        Check for high-churn memories that should be promoted to identity.
+
+        This implements the AfterImage pattern of detecting "churn" -
+        memories accessed so frequently they likely represent core facts.
+
+        Returns:
+            Number of memories promoted
+        """
+        # Get recent memories with high access counts
+        memories = await self.postgres.get_memories(
+            user_id=user_id,
+            limit=100,
+        )
+
+        # Find promotion candidates
+        candidates = get_identity_promotion_candidates(
+            memories,
+            identity_threshold=self.config.churn.identity_promotion_threshold,
+        )
+
+        promoted = 0
+        for mem, analysis in candidates:
+            # Update memory type to identity
+            await self.postgres.update(
+                mem.id,
+                {"memory_type": MemoryType.IDENTITY.value},
+            )
+
+            # Extract key fact for Redis identity store
+            # Simple heuristic: use content as value, generate key from type
+            key = f"fact_{promoted + 1}"
+            await self.redis.update_identity_field(user_id, key, mem.content)
+
+            logger.info(
+                "memory_promoted_to_identity",
+                user_id=user_id,
+                memory_id=mem.id,
+                access_count=analysis.access_count,
+            )
+            promoted += 1
+
+        # Invalidate cache after promotions
+        if promoted > 0 and self.cache:
+            self.cache.identity.invalidate(user_id)
+
+        return promoted
+
+    async def get_cache_stats(self) -> dict | None:
+        """Get in-memory cache statistics."""
+        if self.cache:
+            return self.cache.stats
+        return None
+
+    async def cleanup_caches(self) -> dict:
+        """Cleanup expired cache entries."""
+        if self.cache:
+            return self.cache.cleanup_expired()
+        return {}
