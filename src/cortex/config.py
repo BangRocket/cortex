@@ -141,6 +141,107 @@ class RetrievalConfig(BaseSettings):
         return self
 
 
+class TokenBudgetConfig(BaseSettings):
+    """Configuration for token budget management (AfterImage pattern)."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_BUDGET_")
+
+    # Maximum tokens for context injection
+    max_context_tokens: int = 4000
+
+    # How many top memories to keep full (rest get summarized)
+    full_memory_count: int = 5
+
+    # Target summary length in tokens
+    summary_target_tokens: int = 500
+
+    # Enable/disable automatic summarization
+    enable_summarization: bool = True
+
+    # Approximate tokens per character (for estimation)
+    tokens_per_char: float = 0.25
+
+
+class ChurnConfig(BaseSettings):
+    """Configuration for churn detection and reinforcement (AfterImage pattern)."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_CHURN_")
+
+    # Access count threshold to consider "high churn"
+    churn_threshold: int = 10
+
+    # Importance boost for high-churn memories (added to base importance)
+    importance_boost: float = 0.2
+
+    # Access count threshold to auto-promote to identity
+    identity_promotion_threshold: int = 25
+
+
+class CacheConfig(BaseSettings):
+    """Configuration for in-memory LRU cache (AfterImage pattern)."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_CACHE_")
+
+    # Enable in-memory cache layer
+    enabled: bool = True
+
+    # Max entries in identity cache
+    identity_cache_size: int = 100
+
+    # Max entries in context cache
+    context_cache_size: int = 50
+
+    # Cache TTL in seconds (5 minutes)
+    cache_ttl: int = 300
+
+
+class Neo4jConfig(BaseSettings):
+    """Neo4j connection configuration for graph memory."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_NEO4J_")
+
+    # Connection
+    uri: str = "bolt://localhost:7687"
+    user: str = "neo4j"
+    password: str = ""
+    database: str = "neo4j"
+
+    # Connection pool
+    max_connection_pool_size: int = 50
+    connection_timeout: float = 30.0
+
+
+class GraphConfig(BaseSettings):
+    """Configuration for graph memory (entity/relationship extraction)."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_GRAPH_")
+
+    # Enable graph memory
+    enabled: bool = True
+
+    # Entity extraction
+    extract_entities: bool = True
+    min_entity_confidence: float = 0.7
+
+    # Relationship inference
+    infer_relationships: bool = True
+    min_relationship_confidence: float = 0.6
+
+    # Graph traversal limits
+    max_hop_depth: int = 2
+    max_related_entities: int = 20
+
+    # Entity types to extract
+    entity_types: list[str] = [
+        "person",
+        "organization",
+        "location",
+        "project",
+        "concept",
+        "event",
+    ]
+
+
 class CortexConfig(BaseSettings):
     """Main configuration for Cortex memory system."""
 
@@ -158,10 +259,20 @@ class CortexConfig(BaseSettings):
     ttl: TTLConfig = Field(default_factory=TTLConfig)
     retrieval: RetrievalConfig = Field(default_factory=RetrievalConfig)
 
+    # AfterImage-inspired features
+    token_budget: TokenBudgetConfig = Field(default_factory=TokenBudgetConfig)
+    churn: ChurnConfig = Field(default_factory=ChurnConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
+
+    # Graph memory (mem0-style)
+    neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
+    graph: GraphConfig = Field(default_factory=GraphConfig)
+
     # Feature flags
     enable_consolidation: bool = True
     enable_emotional_scoring: bool = True
     enable_rejection_pipeline: bool = True
+    enable_graph_memory: bool = True
 
     # Debug
     debug: bool = False
