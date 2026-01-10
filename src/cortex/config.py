@@ -195,6 +195,53 @@ class CacheConfig(BaseSettings):
     cache_ttl: int = 300
 
 
+class Neo4jConfig(BaseSettings):
+    """Neo4j connection configuration for graph memory."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_NEO4J_")
+
+    # Connection
+    uri: str = "bolt://localhost:7687"
+    user: str = "neo4j"
+    password: str = ""
+    database: str = "neo4j"
+
+    # Connection pool
+    max_connection_pool_size: int = 50
+    connection_timeout: float = 30.0
+
+
+class GraphConfig(BaseSettings):
+    """Configuration for graph memory (entity/relationship extraction)."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_GRAPH_")
+
+    # Enable graph memory
+    enabled: bool = False
+
+    # Entity extraction
+    extract_entities: bool = True
+    min_entity_confidence: float = 0.7
+
+    # Relationship inference
+    infer_relationships: bool = True
+    min_relationship_confidence: float = 0.6
+
+    # Graph traversal limits
+    max_hop_depth: int = 2
+    max_related_entities: int = 20
+
+    # Entity types to extract
+    entity_types: list[str] = [
+        "person",
+        "organization",
+        "location",
+        "project",
+        "concept",
+        "event",
+    ]
+
+
 class CortexConfig(BaseSettings):
     """Main configuration for Cortex memory system."""
 
@@ -217,10 +264,15 @@ class CortexConfig(BaseSettings):
     churn: ChurnConfig = Field(default_factory=ChurnConfig)
     cache: CacheConfig = Field(default_factory=CacheConfig)
 
+    # Graph memory (mem0-style)
+    neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
+    graph: GraphConfig = Field(default_factory=GraphConfig)
+
     # Feature flags
     enable_consolidation: bool = True
     enable_emotional_scoring: bool = True
     enable_rejection_pipeline: bool = True
+    enable_graph_memory: bool = False
 
     # Debug
     debug: bool = False

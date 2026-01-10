@@ -15,10 +15,13 @@ from cortex.algorithms import (
 )
 from cortex.config import CortexConfig
 from cortex.models import (
+    Entity,
+    GraphContext,
     Memory,
     MemoryContext,
     MemoryStatus,
     MemoryType,
+    Relationship,
     SearchResult,
     StoreResult,
 )
@@ -30,7 +33,9 @@ from cortex.utils.embedder import create_embedder
 from cortex.utils.scorer import EmotionScorer
 
 if TYPE_CHECKING:
+    from cortex.stores.graph_store import GraphStore
     from cortex.utils.embedder import Embedder
+    from cortex.utils.entity_extractor import EntityExtractor
 
 logger = structlog.get_logger(__name__)
 
@@ -70,18 +75,38 @@ class MemoryManager:
             ttl=config.cache.cache_ttl,
         ) if config.cache.enabled else None
 
+        # Graph memory (mem0-style)
+        self.graph: GraphStore | None = None
+        self.entity_extractor: EntityExtractor | None = None
+        if config.enable_graph_memory and config.graph.enabled:
+            from cortex.stores.graph_store import GraphStore
+            from cortex.utils.entity_extractor import EntityExtractor
+            self.graph = GraphStore(config.neo4j)
+            self.entity_extractor = EntityExtractor(config.llm, config.graph)
+
     async def initialize(self) -> None:
-        """Initialize connections to Redis and Postgres."""
+        """Initialize connections to Redis, Postgres, and optionally Neo4j."""
         await self.redis.connect()
         await self.postgres.connect()
         await self.postgres.initialize_schema()
+
+        # Initialize graph store if enabled
+        if self.graph:
+            await self.graph.connect()
+            await self.graph.initialize_schema()
+
         self._initialized = True
-        logger.info("memory_manager_initialized")
+        logger.info(
+            "memory_manager_initialized",
+            graph_enabled=self.graph is not None,
+        )
 
     async def close(self) -> None:
         """Clean shutdown."""
         await self.redis.close()
         await self.postgres.close()
+        if self.graph:
+            await self.graph.close()
         logger.info("memory_manager_closed")
 
     # ==================== CONTEXT ====================
@@ -240,12 +265,26 @@ class MemoryManager:
             if memory.id:
                 await self.redis.add_recent(user_id, memory.id)
 
+            # 5. Extract entities and relationships (graph memory)
+            if self.graph and self.entity_extractor and memory.id:
+                try:
+                    extracted = await self.entity_extractor.extract(
+                        content, user_id, memory.id
+                    )
+                    for entity in extracted.entities:
+                        await self.graph.create_entity(entity)
+                    for relationship in extracted.relationships:
+                        await self.graph.create_relationship(relationship)
+                except Exception as e:
+                    logger.warning("entity_extraction_failed", error=str(e))
+
             logger.debug(
                 "memory_stored",
                 user_id=user_id,
                 memory_id=memory.id,
                 emotional_score=emotional_score,
                 ttl=ttl,
+                graph_enabled=self.graph is not None,
             )
 
             return StoreResult(
@@ -520,3 +559,180 @@ class MemoryManager:
         if self.cache:
             return self.cache.cleanup_expired()
         return {}
+
+    # ==================== GRAPH MEMORY ====================
+
+    async def get_graph_context(
+        self,
+        user_id: str,
+        entity_names: list[str],
+        max_depth: int | None = None,
+        max_entities: int | None = None,
+    ) -> GraphContext | None:
+        """
+        Get graph-based context for a set of entity names.
+
+        Args:
+            user_id: User identifier
+            entity_names: List of entity names to find and expand
+            max_depth: Max hops for relationship traversal
+            max_entities: Max entities to return
+
+        Returns:
+            GraphContext with entities and relationships, or None if graph disabled
+        """
+        if not self.graph:
+            return None
+
+        return await self.graph.get_graph_context(
+            user_id=user_id,
+            entity_names=entity_names,
+            max_depth=max_depth or self.config.graph.max_hop_depth,
+            max_entities=max_entities or self.config.graph.max_related_entities,
+        )
+
+    async def search_entities(
+        self,
+        user_id: str,
+        query: str,
+        entity_types: list[str] | None = None,
+        limit: int = 20,
+    ) -> list[Entity]:
+        """
+        Search for entities by name/description.
+
+        Args:
+            user_id: User identifier
+            query: Search query
+            entity_types: Optional filter by entity types
+            limit: Max results
+
+        Returns:
+            List of matching entities
+        """
+        if not self.graph:
+            return []
+
+        return await self.graph.search_entities(
+            user_id=user_id,
+            query=query,
+            entity_types=entity_types,
+            limit=limit,
+        )
+
+    async def get_entity_relationships(
+        self,
+        entity_id: str,
+        direction: str = "both",
+    ) -> list[Relationship]:
+        """
+        Get relationships for an entity.
+
+        Args:
+            entity_id: Entity ID
+            direction: "outgoing", "incoming", or "both"
+
+        Returns:
+            List of relationships
+        """
+        if not self.graph:
+            return []
+
+        return await self.graph.get_relationships(
+            entity_id=entity_id,
+            direction=direction,
+        )
+
+    async def get_related_entities(
+        self,
+        entity_id: str,
+        max_depth: int = 2,
+        limit: int = 20,
+    ) -> list[Entity]:
+        """
+        Get entities related to a given entity within N hops.
+
+        Args:
+            entity_id: Starting entity ID
+            max_depth: Max relationship hops
+            limit: Max entities to return
+
+        Returns:
+            List of related entities
+        """
+        if not self.graph:
+            return []
+
+        return await self.graph.get_related_entities(
+            entity_id=entity_id,
+            max_depth=max_depth,
+            limit=limit,
+        )
+
+    async def find_entity_path(
+        self,
+        source_entity_id: str,
+        target_entity_id: str,
+        max_depth: int = 4,
+    ) -> list[str] | None:
+        """
+        Find shortest path between two entities.
+
+        Args:
+            source_entity_id: Starting entity ID
+            target_entity_id: Target entity ID
+            max_depth: Max path length
+
+        Returns:
+            List of entity names in the path, or None if no path found
+        """
+        if not self.graph:
+            return None
+
+        return await self.graph.find_path(
+            source_id=source_entity_id,
+            target_id=target_entity_id,
+            max_depth=max_depth,
+        )
+
+    async def get_user_entities(
+        self,
+        user_id: str,
+        entity_type: str | None = None,
+        limit: int = 100,
+    ) -> list[Entity]:
+        """
+        Get all entities for a user.
+
+        Args:
+            user_id: User identifier
+            entity_type: Optional filter by type
+            limit: Max results
+
+        Returns:
+            List of entities
+        """
+        if not self.graph:
+            return []
+
+        return await self.graph.get_user_entities(
+            user_id=user_id,
+            entity_type=entity_type,
+            limit=limit,
+        )
+
+    async def get_graph_stats(self, user_id: str | None = None) -> dict:
+        """
+        Get graph memory statistics.
+
+        Returns:
+            Dict with entity and relationship counts
+        """
+        if not self.graph:
+            return {"enabled": False}
+
+        return {
+            "enabled": True,
+            "entity_count": await self.graph.count_entities(user_id),
+            "relationship_count": await self.graph.count_relationships(user_id),
+        }

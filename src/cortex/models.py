@@ -199,3 +199,114 @@ class GroupContext:
     personal: MemoryContext
     project: ProjectContext | None = None
     channel_id: str | None = None
+
+
+# ==================== GRAPH MEMORY MODELS ====================
+
+
+@dataclass
+class Entity:
+    """An entity extracted from memories (node in the graph)."""
+
+    name: str
+    entity_type: str  # person, organization, location, project, concept, event
+    user_id: str
+
+    # Identifiers
+    id: str | None = None
+
+    # Attributes
+    description: str | None = None
+    confidence: float = 1.0
+
+    # Timestamps
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+    # Tracking
+    mention_count: int = 1
+    source_memories: list[str] = field(default_factory=list)  # Memory IDs
+
+    # Metadata
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.id is None:
+            self.id = str(uuid.uuid4())
+
+
+@dataclass
+class Relationship:
+    """A relationship between two entities (edge in the graph)."""
+
+    source_id: str  # Entity ID
+    target_id: str  # Entity ID
+    relationship_type: str  # e.g., "works_at", "knows", "located_in", "part_of"
+    user_id: str
+
+    # Identifiers
+    id: str | None = None
+
+    # Attributes
+    description: str | None = None
+    confidence: float = 1.0
+    strength: float = 1.0  # Reinforced by repeated mentions
+
+    # Timestamps
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+
+    # Source tracking
+    source_memories: list[str] = field(default_factory=list)
+
+    # Metadata
+    attributes: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        if self.id is None:
+            self.id = str(uuid.uuid4())
+
+
+@dataclass
+class GraphContext:
+    """Graph-based context for a query."""
+
+    entities: list[Entity]
+    relationships: list[Relationship]
+    paths: list[list[str]] = field(default_factory=list)  # Paths between entities
+
+    def to_prompt_string(self) -> str:
+        """Format graph context for inclusion in prompts."""
+        if not self.entities:
+            return ""
+
+        sections = ["## Related Entities"]
+
+        # Group entities by type
+        by_type: dict[str, list[Entity]] = {}
+        for entity in self.entities:
+            if entity.entity_type not in by_type:
+                by_type[entity.entity_type] = []
+            by_type[entity.entity_type].append(entity)
+
+        for entity_type, entities in by_type.items():
+            sections.append(f"\n### {entity_type.title()}s")
+            for e in entities[:10]:  # Limit per type
+                desc = f": {e.description}" if e.description else ""
+                sections.append(f"- {e.name}{desc}")
+
+        if self.relationships:
+            sections.append("\n## Relationships")
+            for r in self.relationships[:15]:  # Limit total
+                sections.append(f"- {r.relationship_type}: {r.description or ''}")
+
+        return "\n".join(sections)
+
+
+@dataclass
+class ExtractedEntities:
+    """Result of entity extraction from text."""
+
+    entities: list[Entity]
+    relationships: list[Relationship]
+    source_memory_id: str | None = None
