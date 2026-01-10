@@ -155,8 +155,7 @@ Reply with just a number."""
                 temperature=0,
             )
             text = response.choices[0].message.content.strip()
-            import re as regex
-            match = regex.search(r"(\d+\.?\d*)", text)
+            match = re.search(r"(\d+\.?\d*)", text)
             if match:
                 return float(match.group(1))
             return 0.5  # Default mid-range if parsing fails

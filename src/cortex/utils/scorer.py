@@ -55,25 +55,40 @@ class EmotionScorer:
 
     @property
     def client(self):
-        """Lazy load the OpenAI client."""
+        """Lazy load the appropriate LLM client based on provider."""
         if self._client is None:
-            from openai import AsyncOpenAI
-            self._client = AsyncOpenAI(api_key=self.config.api_key)
+            if self.config.provider == "anthropic":
+                from anthropic import AsyncAnthropic
+                self._client = AsyncAnthropic(api_key=self.config.api_key)
+            else:
+                from openai import AsyncOpenAI
+                self._client = AsyncOpenAI(api_key=self.config.api_key)
         return self._client
+
+    async def _call_llm(self, prompt: str, max_tokens: int = 100) -> str:
+        """Call the LLM with the appropriate API."""
+        if self.config.provider == "anthropic":
+            response = await self.client.messages.create(
+                model=self.config.model,
+                max_tokens=max_tokens,
+                messages=[{"role": "user", "content": prompt}],
+            )
+            return response.content[0].text.strip()
+        else:
+            response = await self.client.chat.completions.create(
+                model=self.config.model,
+                messages=[{"role": "user", "content": prompt}],
+                max_tokens=max_tokens,
+                temperature=0,
+            )
+            return response.choices[0].message.content.strip()
 
     async def score(self, content: str) -> float:
         """Score emotional intensity of content."""
         prompt = EMOTION_SCORING_PROMPT.format(content=content)
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.config.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=5,
-                temperature=0,
-            )
-
-            text = response.choices[0].message.content.strip()
+            text = await self._call_llm(prompt, max_tokens=5)
             # Extract float from response
             match = re.search(r"(\d+\.?\d*)", text)
             if match:
@@ -93,20 +108,13 @@ class EmotionScorer:
         prompt = CLASSIFICATION_PROMPT.format(content=content)
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.config.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=100,
-                temperature=0,
-            )
-
-            text = response.choices[0].message.content.strip()
+            text = await self._call_llm(prompt, max_tokens=100)
             # Try to parse JSON from response
             # Handle markdown code blocks
             if "```" in text:
-                text = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
-                if text:
-                    text = text.group(1)
+                match = re.search(r"```(?:json)?\s*(.*?)\s*```", text, re.DOTALL)
+                if match:
+                    text = match.group(1)
                 else:
                     return {"type": "episodic", "confidence": 0.5, "identity_key": None}
 

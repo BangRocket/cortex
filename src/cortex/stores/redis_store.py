@@ -12,6 +12,11 @@ import structlog
 
 from cortex.config import RedisConfig
 from cortex.models import Memory, MemoryType
+from cortex.observability import (
+    record_working_memory_expired,
+    set_redis_connected,
+    set_working_memory_size,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -44,12 +49,14 @@ class RedisStore:
             max_connections=self.config.max_connections,
         )
         await self.client.ping()
+        set_redis_connected(True)
         logger.info("redis_connected", host=self.config.host, port=self.config.port)
 
     async def close(self) -> None:
         """Close Redis connection."""
         if self.client:
             await self.client.close()
+            set_redis_connected(False)
             logger.info("redis_disconnected")
 
     def _key(self, user_id: str, suffix: str) -> str:
@@ -254,7 +261,11 @@ class RedisStore:
         if expired:
             await self.client.zrem(key, *expired)
             expired_count = len(expired)
+            record_working_memory_expired(user_id, expired_count)
             logger.debug("working_memory_expired_removed", user_id=user_id, count=expired_count)
+
+        # Update working memory size metric
+        set_working_memory_size(user_id, len(result))
 
         return result, expired_count
 

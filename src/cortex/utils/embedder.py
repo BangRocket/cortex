@@ -79,7 +79,6 @@ class LocalEmbedder(Embedder):
         from sentence_transformers import SentenceTransformer
 
         self.model = SentenceTransformer(config.local_model)
-        self._loop: asyncio.AbstractEventLoop | None = None
 
     async def embed(self, text: str) -> list[float]:
         """Generate embedding for a single text."""

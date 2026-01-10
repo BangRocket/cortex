@@ -18,6 +18,7 @@ from cortex.models import (
     MemoryStatus,
     MemoryType,
 )
+from cortex.observability import set_postgres_connected
 
 logger = structlog.get_logger(__name__)
 
@@ -49,12 +50,14 @@ class PostgresStore:
         async with self.pool.acquire() as conn:
             await register_vector(conn)
 
+        set_postgres_connected(True)
         logger.info("postgres_connected", host=self.config.host, database=self.config.database)
 
     async def close(self) -> None:
         """Close connection pool."""
         if self.pool:
             await self.pool.close()
+            set_postgres_connected(False)
             logger.info("postgres_disconnected")
 
     async def initialize_schema(self) -> None:
