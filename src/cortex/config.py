@@ -242,6 +242,33 @@ class GraphConfig(BaseSettings):
     ]
 
 
+class MigrationConfig(BaseSettings):
+    """Configuration for mem0 to Cortex migration."""
+
+    model_config = SettingsConfigDict(env_prefix="CORTEX_MIGRATION_")
+
+    # Auto-migration on startup (requires explicit opt-in)
+    auto_migrate_mem0: bool = False
+
+    # Create backup before migration
+    backup_before_migrate: bool = True
+
+    # Run LLM classification on migrated memories
+    classify_on_migrate: bool = True
+
+    # Batch size for processing
+    batch_size: int = 100
+
+    # Preserve original mem0 IDs in metadata
+    preserve_mem0_ids: bool = True
+
+    # Default user_id for memories without one
+    default_user_id: str = "default"
+
+    # Re-embed if vector dimensions don't match
+    reembed_on_dimension_mismatch: bool = True
+
+
 class CortexConfig(BaseSettings):
     """Main configuration for Cortex memory system."""
 
@@ -267,6 +294,9 @@ class CortexConfig(BaseSettings):
     # Graph memory (mem0-style)
     neo4j: Neo4jConfig = Field(default_factory=Neo4jConfig)
     graph: GraphConfig = Field(default_factory=GraphConfig)
+
+    # Migration settings
+    migration: MigrationConfig = Field(default_factory=MigrationConfig)
 
     # Feature flags
     enable_consolidation: bool = True

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 import json
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import asyncpg
 import structlog
 from pgvector.asyncpg import register_vector
 
-from cortex.config import PostgresConfig
+from cortex.config import MigrationConfig, PostgresConfig
 from cortex.models import (
     Contradiction,
     ConsolidationLog,
@@ -20,6 +20,9 @@ from cortex.models import (
 )
 from cortex.observability import set_postgres_connected
 
+if TYPE_CHECKING:
+    from cortex.migration.schema_detector import SchemaInfo
+
 logger = structlog.get_logger(__name__)
 
 
@@ -28,10 +31,16 @@ class PostgresStore:
     Postgres store for warm memory layer.
 
     Uses pgvector for semantic search over embeddings.
+    Supports automatic detection and migration from mem0 schema.
     """
 
-    def __init__(self, config: PostgresConfig) -> None:
+    def __init__(
+        self,
+        config: PostgresConfig,
+        migration_config: MigrationConfig | None = None,
+    ) -> None:
         self.config = config
+        self.migration_config = migration_config or MigrationConfig()
         self.pool: asyncpg.Pool | None = None
 
     async def connect(self) -> None:
@@ -61,7 +70,83 @@ class PostgresStore:
             logger.info("postgres_disconnected")
 
     async def initialize_schema(self) -> None:
-        """Create tables if they don't exist."""
+        """
+        Create tables if they don't exist.
+
+        Automatically detects mem0 schema and migrates if configured.
+        """
+        assert self.pool is not None
+
+        # Detect existing schema
+        schema_info = await self.detect_schema()
+
+        # Handle mem0 schema
+        if schema_info.schema_type.value == "mem0":
+            await self._handle_mem0_schema(schema_info)
+            return  # Migration creates the schema
+
+        await self._create_cortex_schema()
+
+    async def detect_schema(self) -> SchemaInfo:
+        """Detect the current database schema type."""
+        from cortex.migration.schema_detector import SchemaDetector
+
+        assert self.pool is not None
+        detector = SchemaDetector()
+        return await detector.detect(self.pool)
+
+    async def _handle_mem0_schema(self, schema_info: SchemaInfo) -> None:
+        """Handle detected mem0 schema based on configuration."""
+        from cortex.migration.direct_migration import (
+            DirectMigrator,
+            Mem0SchemaDetectedError,
+        )
+
+        assert self.pool is not None
+
+        if not self.migration_config.auto_migrate_mem0:
+            logger.warning(
+                "mem0_schema_detected",
+                memory_count=schema_info.memory_count,
+                user_count=schema_info.user_count,
+                action="manual_migration_required",
+            )
+            raise Mem0SchemaDetectedError(
+                f"Database contains mem0 schema with {schema_info.memory_count} memories. "
+                "Set CORTEX_MIGRATION_AUTO_MIGRATE_MEM0=true to auto-migrate, "
+                "or run migration manually."
+            )
+
+        logger.info(
+            "mem0_schema_detected",
+            memory_count=schema_info.memory_count,
+            user_count=schema_info.user_count,
+            action="auto_migrate",
+        )
+
+        # Run migration
+        migrator = DirectMigrator(
+            pool=self.pool,
+            migration_config=self.migration_config,
+            postgres_config=self.config,
+        )
+
+        report = await migrator.migrate(dry_run=False)
+
+        if not report.success:
+            raise RuntimeError(
+                f"mem0 migration failed: {report.error_details}"
+            )
+
+        logger.info(
+            "mem0_migration_complete",
+            migrated=report.migrated,
+            skipped=report.skipped,
+            backup_table=report.backup_table,
+        )
+
+    async def _create_cortex_schema(self) -> None:
+        """Create the Cortex database schema."""
         assert self.pool is not None
 
         async with self.pool.acquire() as conn:
