@@ -168,6 +168,10 @@ class PostgresStore:
 
     def _row_to_memory(self, row: asyncpg.Record) -> Memory:
         """Convert database row to Memory object."""
+        # Handle embedding - check explicitly for None since numpy arrays can't be evaluated as bool
+        embedding = row["embedding"]
+        embedding_list = list(embedding) if embedding is not None else None
+
         return Memory(
             id=str(row["id"]),
             user_id=row["user_id"],
@@ -185,7 +189,7 @@ class PostgresStore:
             source=row["source"],
             tags=list(row["tags"]) if row["tags"] else [],
             metadata=json.loads(row["metadata"]) if row["metadata"] else {},
-            embedding=list(row["embedding"]) if row["embedding"] else None,
+            embedding=embedding_list,
             status=MemoryStatus(row["status"]),
         )
 

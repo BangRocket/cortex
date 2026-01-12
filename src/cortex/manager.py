@@ -340,7 +340,8 @@ class MemoryManager:
 
     def _rerank(self, memories: list[Memory]) -> list[Memory]:
         """Re-rank memories using full scoring algorithm with churn boost."""
-        now = datetime.utcnow()
+        from datetime import timezone
+        now = datetime.now(timezone.utc)
 
         scored = []
         for mem in memories:
